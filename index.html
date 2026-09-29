@@ -292,7 +292,13 @@ const ROLES = [
 
 let role = 'pemohon';
 let DATA = [];
-let CONFIG = {scriptUrl:''};
+/*
+ * URL Web App Google Apps Script.
+ * Setelah Deploy > Web app, tempel URL /exec di sini.
+ * Dengan cara ini pengguna TIDAK perlu menekan tombol "kirim ke Google Sheet".
+ */
+const APPS_SCRIPT_URL = 'PASTE_URL_WEB_APP_APPS_SCRIPT_DI_SINI';
+let CONFIG = {scriptUrl: APPS_SCRIPT_URL};
 
 /* ---------------- storage (local, shared across everyone opening the page) ---------------- */
 async function loadData(){
@@ -301,17 +307,31 @@ async function loadData(){
     DATA = res ? JSON.parse(res.value) : [];
   }catch(e){ DATA = []; }
 }
-async function saveData(){
+async function saveData(changedItem=null){
   try{
     await window.storage.set('sipatera-data', JSON.stringify(DATA), true);
-  }catch(e){ console.error('Gagal menyimpan', e); }
-  syncToAppsScript();
+  }catch(e){
+    console.error('Gagal menyimpan lokal', e);
+  }
+
+  // Kirim otomatis ke Google Sheet setiap ada perubahan.
+  if(changedItem && CONFIG.scriptUrl){
+    try{
+      await syncItemToAppsScript(changedItem);
+    }catch(e){
+      console.error('Gagal mengirim data ke Google Sheet:', e);
+      throw new Error('Data lokal tersimpan, tetapi gagal terkirim ke Google Sheet. Periksa URL Web App dan akses deployment.');
+    }
+  }
 }
 async function loadConfig(){
-  try{
-    const res = await window.storage.get('sipatera-config', true);
-    CONFIG = res ? JSON.parse(res.value) : {scriptUrl:''};
-  }catch(e){ CONFIG = {scriptUrl:''}; }
+  // URL Apps Script ditetapkan dari kode aplikasi, sehingga sinkronisasi
+  // berjalan otomatis tanpa pengguna memasukkan URL atau menekan tombol.
+  CONFIG = {
+    scriptUrl: APPS_SCRIPT_URL && !APPS_SCRIPT_URL.includes('PASTE_URL_')
+      ? APPS_SCRIPT_URL.trim()
+      : ''
+  };
   updateSyncBadge();
 }
 async function saveConfig(){
@@ -329,15 +349,29 @@ function updateSyncBadge(){
    scriptUrl points to a deployed Apps Script Web App (see Code.gs).
    POST uses text/plain content-type so the browser does not send a CORS
    preflight (Apps Script does not answer OPTIONS requests by default). */
+async function syncItemToAppsScript(item){
+  if(!CONFIG.scriptUrl) return {ok:false, skipped:true};
+  const res = await fetch(CONFIG.scriptUrl, {
+    method:'POST',
+    headers:{'Content-Type':'text/plain;charset=utf-8'},
+    body: JSON.stringify({action:'saveItem', item})
+  });
+  if(!res.ok) throw new Error('HTTP '+res.status);
+  const json = await res.json();
+  if(!json.ok) throw new Error(json.error || 'Google Sheet menolak data');
+  return json;
+}
+
 async function syncToAppsScript(){
-  if(!CONFIG.scriptUrl) return;
-  try{
-    await fetch(CONFIG.scriptUrl, {
-      method:'POST',
-      headers:{'Content-Type':'text/plain;charset=utf-8'},
-      body: JSON.stringify({action:'sync', data: DATA})
-    });
-  }catch(e){ console.warn('Sinkron ke Apps Script gagal', e); }
+  // Dipertahankan untuk tombol sinkronisasi/manual recovery.
+  if(!CONFIG.scriptUrl) return {ok:false, skipped:true};
+  const res = await fetch(CONFIG.scriptUrl, {
+    method:'POST',
+    headers:{'Content-Type':'text/plain;charset=utf-8'},
+    body: JSON.stringify({action:'sync', data: DATA})
+  });
+  if(!res.ok) throw new Error('HTTP '+res.status);
+  return res.json();
 }
 async function pullFromAppsScript(){
   if(!CONFIG.scriptUrl) return false;
@@ -673,8 +707,8 @@ function bindActions(){
               const res = await uploadFileToAppsScript(nomor, docName, f);
               dokumen.push({nama:docName, fileName:f.name, url: (res && res.url) || ''});
             }catch(err){
-              console.warn('Upload gagal untuk', docName, err);
-              dokumen.push({nama:docName, fileName:f.name, url:''});
+              console.error('Upload gagal untuk', docName, err);
+              throw new Error('Gagal mengupload '+docName+': '+err.message);
             }
           } else {
             dokumen.push({nama:docName, fileName:f.name, url:''});
@@ -690,7 +724,7 @@ function bindActions(){
         };
         log(item, 'Permohonan diajukan oleh pemohon.');
         DATA.push(item);
-        await saveData();
+        await saveData(item);
         render();
       } finally {
         if(document.getElementById('btnKirim')){
@@ -704,19 +738,21 @@ function bindActions(){
   const btnSaveUrl = document.getElementById('btnSaveUrl');
   if(btnSaveUrl){
     btnSaveUrl.addEventListener('click', async () => {
-      const val = document.getElementById('scriptUrlInput').value.trim();
-      CONFIG.scriptUrl = val;
-      await saveConfig();
-      alert(val ? 'URL Apps Script disimpan.' : 'URL dikosongkan, sinkronisasi dinonaktifkan.');
-      render();
+      alert(CONFIG.scriptUrl
+        ? 'Sinkronisasi otomatis sudah aktif. URL Apps Script ditetapkan di kode aplikasi.'
+        : 'URL Web App Apps Script belum diisi di konstanta APPS_SCRIPT_URL.');
     });
   }
   const btnSyncNow = document.getElementById('btnSyncNow');
   if(btnSyncNow){
     btnSyncNow.addEventListener('click', async () => {
       if(!CONFIG.scriptUrl){ alert('Simpan URL Apps Script terlebih dahulu.'); return; }
-      await syncToAppsScript();
-      alert('Data terkirim ke Google Sheet.');
+      try{
+        const r = await syncToAppsScript();
+        alert(r && r.ok ? 'Data terkirim ke Google Sheet.' : 'Sinkronisasi gagal.');
+      }catch(e){
+        alert('Gagal mengirim data: '+e.message);
+      }
     });
   }
   const btnPullNow = document.getElementById('btnPullNow');
@@ -761,7 +797,7 @@ function bindActions(){
       if(act==='selesai_pakai'){ item.status='pengembalian'; log(item,'Pemohon menyelesaikan penggunaan.'); }
       if(act==='konfirmasi_kembali'){ item.status='selesai'; log(item,'Pengembalian dikonfirmasi. Siklus selesai.'); }
 
-      await saveData();
+      await saveData(item);
       render();
     });
   });
